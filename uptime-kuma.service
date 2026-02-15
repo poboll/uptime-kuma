@@ -1,0 +1,42 @@
+[Unit]
+Description=Uptime Kuma - Optimized for Low-End Server
+Documentation=https://github.com/louislam/uptime-kuma
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+Group=YOUR_USERNAME
+WorkingDirectory=/path/to/uptime-kuma
+
+# 环境变量
+Environment="NODE_ENV=production"
+Environment="NODE_OPTIONS=--max-old-space-size=128"
+Environment="UPTIME_KUMA_LOG_LEVEL=warn"
+
+# 启动命令
+ExecStart=/usr/bin/node server/server.js
+
+# 自动重启配置
+Restart=always
+RestartSec=10
+
+# 日志配置
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=uptime-kuma
+
+# 资源限制
+MemoryLimit=200M
+MemoryMax=250M
+CPUQuota=50%
+
+# 安全配置
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/path/to/uptime-kuma/data
+
+[Install]
+WantedBy=multi-user.target

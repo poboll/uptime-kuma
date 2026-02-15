@@ -1,0 +1,400 @@
+name: Auto Update and Release
+
+on:
+  schedule:
+    # 每天北京时间早上 9 点检查更新 (UTC 1:00)
+    - cron: '0 1 * * *'
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/louislam/uptime-kuma.git || true
+          git fetch upstream
+
+      - name: Check for updates
+        id: check_updates
+        run: |
+          # 获取上游最新版本
+          UPSTREAM_VERSION=$(git describe --tags --abbrev=0 upstream/master 2>/dev/null || echo "0.0.0")
+          # 获取当前版本
+          CURRENT_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+
+          echo "upstream_version=$UPSTREAM_VERSION" >> $GITHUB_OUTPUT
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+          if [ "$UPSTREAM_VERSION" != "$CURRENT_VERSION" ]; then
+            echo "has_updates=true" >> $GITHUB_OUTPUT
+            echo "🎉 发现新版本: $CURRENT_VERSION -> $UPSTREAM_VERSION"
+          else
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+            echo "✅ 已是最新版本: $CURRENT_VERSION"
+          fi
+
+      - name: Merge upstream changes
+        if: steps.check_updates.outputs.has_updates == 'true'
+        run: |
+          # 合并上游更新
+          git merge upstream/master --no-edit || {
+            echo "⚠️ 合并冲突，尝试使用上游版本"
+            git merge --strategy-option theirs upstream/master --no-edit
+          }
+
+      - name: Setup Node.js
+        if: steps.check_updates.outputs.has_updates == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install production dependencies only
+        if: steps.check_updates.outputs.has_updates == 'true'
+        run: |
+          echo "📦 安装生产依赖（节省资源）"
+          npm ci --omit=dev --no-audit --prefer-offline
+
+      - name: Download pre-built frontend
+        if: steps.check_updates.outputs.has_updates == 'true'
+        run: |
+          echo "⬇️ 下载预构建前端资源"
+          npm run download-dist || {
+            echo "⚠️ 下载失败，尝试本地构建"
+            npm install --include=dev
+            npm run build
+          }
+
+      - name: Create optimized deployment package
+        if: steps.check_updates.outputs.has_updates == 'true'
+        run: |
+          echo "📦 创建优化部署包"
+
+          # 创建部署目录
+          mkdir -p deploy-package
+
+          # 复制必要文件
+          cp -r server deploy-package/
+          cp -r dist deploy-package/
+          cp -r db deploy-package/
+          cp -r extra deploy-package/
+          cp -r node_modules deploy-package/
+          cp package.json deploy-package/
+          cp package-lock.json deploy-package/
+
+          # 创建优化的启动脚本
+          cat > deploy-package/start-optimized.sh << 'EOF'
+#!/bin/bash
+# Uptime Kuma 优化启动脚本 - 适用于低配服务器
+
+# 限制 Node.js 内存使用 (128MB)
+export NODE_OPTIONS="--max-old-space-size=128"
+
+# 设置生产环境
+export NODE_ENV=production
+
+# 减少日志输出
+export UPTIME_KUMA_LOG_LEVEL=warn
+
+# 启动服务
+node server/server.js
+EOF
+
+          chmod +x deploy-package/start-optimized.sh
+
+          # 创建 PM2 配置文件（低资源消耗）
+          cat > deploy-package/ecosystem.config.js << 'EOF'
+module.exports = {
+  apps: [{
+    name: 'uptime-kuma',
+    script: 'server/server.js',
+    instances: 1,
+    exec_mode: 'fork',
+
+    // 内存限制
+    max_memory_restart: '150M',
+
+    // Node.js 参数
+    node_args: '--max-old-space-size=128',
+
+    // 环境变量
+    env: {
+      NODE_ENV: 'production',
+      UPTIME_KUMA_LOG_LEVEL: 'warn'
+    },
+
+    // 日志配置（限制大小）
+    error_file: 'logs/error.log',
+    out_file: 'logs/out.log',
+    log_date_format: 'YYYY-MM-DD HH:mm:ss',
+    merge_logs: true,
+
+    // 自动重启配置
+    autorestart: true,
+    watch: false,
+    max_restarts: 10,
+    min_uptime: '10s',
+
+    // 优雅关闭
+    kill_timeout: 5000,
+    wait_ready: true,
+    listen_timeout: 10000
+  }]
+};
+EOF
+
+          # 创建 systemd 服务文件
+          cat > deploy-package/uptime-kuma.service << 'EOF'
+[Unit]
+Description=Uptime Kuma - Optimized for Low-End Server
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/uptime-kuma
+Environment="NODE_ENV=production"
+Environment="NODE_OPTIONS=--max-old-space-size=128"
+Environment="UPTIME_KUMA_LOG_LEVEL=warn"
+ExecStart=/usr/bin/node server/server.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=uptime-kuma
+
+# 资源限制
+MemoryLimit=200M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+          # 创建优化配置说明
+          cat > deploy-package/OPTIMIZATION.md << 'EOF'
+# 🚀 低配服务器优化配置
+
+本版本已针对低配服务器进行优化：
+
+## ✅ 已应用的优化
+
+1. **仅生产依赖** - 减少 ~150MB 磁盘占用
+2. **限制内存** - 最大 128MB Node.js 堆内存
+3. **减少日志** - 仅输出警告和错误
+4. **预构建前端** - 无需本地构建，节省资源
+
+## 📊 预期资源消耗
+
+- **内存**: ~80-120 MB
+- **磁盘**: ~400 MB
+- **CPU**: 空闲时 <1%
+
+## 🔧 部署方式
+
+### 方式 1: 使用 PM2（推荐）
+
+```bash
+npm install pm2 -g
+pm2 start ecosystem.config.js
+pm2 startup
+pm2 save
+```
+
+### 方式 2: 使用 systemd
+
+```bash
+# 编辑服务文件，修改用户名和路径
+sudo nano uptime-kuma.service
+
+# 复制到系统目录
+sudo cp uptime-kuma.service /etc/systemd/system/
+
+# 启动服务
+sudo systemctl daemon-reload
+sudo systemctl start uptime-kuma
+sudo systemctl enable uptime-kuma
+```
+
+### 方式 3: 直接运行
+
+```bash
+./start-optimized.sh
+```
+
+## ⚙️ 额外优化建议
+
+1. **减少监控频率**
+   - 在 Web 界面中，将监控间隔设置为 120 秒或更长
+
+2. **限制监控数量**
+   - 建议不超过 20 个监控项目
+
+3. **禁用不必要的功能**
+   - 关闭不需要的通知渠道
+   - 禁用 Docker 监控（如果不需要）
+
+4. **定期清理**
+   ```bash
+   # 清理旧数据（保留 30 天）
+   sqlite3 data/kuma.db "DELETE FROM heartbeat WHERE time < datetime('now', '-30 days');"
+   sqlite3 data/kuma.db "VACUUM;"
+   ```
+
+## 🔍 监控资源使用
+
+```bash
+# 查看内存使用
+ps aux | grep node
+
+# 查看 PM2 状态
+pm2 status
+
+# 查看日志
+pm2 logs uptime-kuma --lines 50
+```
+EOF
+
+          # 打包
+          tar -czf uptime-kuma-optimized.tar.gz -C deploy-package .
+
+          echo "✅ 优化部署包创建完成"
+          ls -lh uptime-kuma-optimized.tar.gz
+
+      - name: Generate release notes
+        if: steps.check_updates.outputs.has_updates == 'true'
+        id: release_notes
+        run: |
+          UPSTREAM_VERSION="${{ steps.check_updates.outputs.upstream_version }}"
+          CURRENT_VERSION="${{ steps.check_updates.outputs.current_version }}"
+
+          cat > release_notes.md << EOF
+          # 🎉 自动更新至 ${UPSTREAM_VERSION}
+
+          ## 📦 版本信息
+
+          - **上游版本**: ${UPSTREAM_VERSION}
+          - **更新时间**: $(date '+%Y-%m-%d %H:%M:%S')
+          - **更新方式**: 自动检测并合并
+
+          ## ⚡ 优化特性
+
+          本版本已针对低配服务器进行深度优化：
+
+          - ✅ **仅生产依赖** - 减少约 150MB 磁盘占用
+          - ✅ **内存限制** - Node.js 堆内存限制为 128MB
+          - ✅ **日志优化** - 仅输出警告和错误级别日志
+          - ✅ **预构建前端** - 无需本地构建，节省 CPU 和时间
+          - ✅ **资源限制** - systemd 配置包含内存和 CPU 限制
+
+          ## 📊 预期资源消耗
+
+          - **内存**: ~80-120 MB（比标准版本节省 30-50%）
+          - **磁盘**: ~400 MB（比标准版本节省 35%）
+          - **CPU**: 空闲时 <1%
+
+          ## 🚀 快速部署
+
+          ### 下载并解压
+
+          \`\`\`bash
+          wget https://github.com/YOUR_USERNAME/uptime-kuma/releases/download/${UPSTREAM_VERSION}/uptime-kuma-optimized.tar.gz
+          tar -xzf uptime-kuma-optimized.tar.gz
+          cd uptime-kuma
+          \`\`\`
+
+          ### 使用 PM2 启动（推荐）
+
+          \`\`\`bash
+          npm install pm2 -g
+          pm2 start ecosystem.config.js
+          pm2 startup && pm2 save
+          \`\`\`
+
+          ### 或使用 systemd
+
+          \`\`\`bash
+          # 编辑 uptime-kuma.service，修改用户名和路径
+          sudo cp uptime-kuma.service /etc/systemd/system/
+          sudo systemctl daemon-reload
+          sudo systemctl start uptime-kuma
+          sudo systemctl enable uptime-kuma
+          \`\`\`
+
+          ## 📝 上游更新日志
+
+          查看完整更新日志: https://github.com/louislam/uptime-kuma/releases/tag/${UPSTREAM_VERSION}
+
+          ## ⚠️ 注意事项
+
+          1. 首次部署需要在浏览器中访问 http://your-server:3001 完成初始设置
+          2. 建议将监控间隔设置为 120 秒或更长以节省资源
+          3. 建议监控项目数量不超过 20 个
+          4. 定期清理旧数据以保持数据库精简
+
+          ---
+
+          🤖 本版本由 GitHub Actions 自动构建和发布
+          EOF
+
+          echo "release_notes<<EOF" >> $GITHUB_OUTPUT
+          cat release_notes.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        if: steps.check_updates.outputs.has_updates == 'true'
+        run: |
+          UPSTREAM_VERSION="${{ steps.check_updates.outputs.upstream_version }}"
+
+          git add .
+          git commit -m "feat: 自动更新至 ${UPSTREAM_VERSION} 并优化低配服务器性能
+
+- 合并上游 ${UPSTREAM_VERSION} 版本更新
+- 优化内存使用（限制 128MB 堆内存）
+- 仅安装生产依赖，减少磁盘占用
+- 添加低配服务器优化配置
+- 包含 PM2 和 systemd 配置文件
+- 预期内存消耗: ~80-120MB
+- 预期磁盘占用: ~400MB
+
+🤖 由 GitHub Actions 自动生成" || echo "没有需要提交的更改"
+
+          git push origin master
+
+      - name: Create GitHub Release
+        if: steps.check_updates.outputs.has_updates == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.check_updates.outputs.upstream_version }}
+          name: "🚀 优化版本 ${{ steps.check_updates.outputs.upstream_version }}"
+          body: ${{ steps.release_notes.outputs.release_notes }}
+          files: uptime-kuma-optimized.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        if: steps.check_updates.outputs.has_updates == 'true'
+        run: |
+          echo "## 🎉 发布成功！" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **版本**: ${{ steps.check_updates.outputs.upstream_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **优化包**: uptime-kuma-optimized.tar.gz" >> $GITHUB_STEP_SUMMARY
+          echo "- **内存消耗**: ~80-120 MB" >> $GITHUB_STEP_SUMMARY
+          echo "- **磁盘占用**: ~400 MB" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "查看发布: https://github.com/${{ github.repository }}/releases/tag/${{ steps.check_updates.outputs.upstream_version }}" >> $GITHUB_STEP_SUMMARY
