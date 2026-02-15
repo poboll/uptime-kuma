@@ -95,178 +95,11 @@ jobs:
           cp package.json deploy-package/
           cp package-lock.json deploy-package/
 
-          # 创建优化的启动脚本
-          cat > deploy-package/start-optimized.sh << 'EOF'
-#!/bin/bash
-# Uptime Kuma 优化启动脚本 - 适用于低配服务器
-
-# 限制 Node.js 内存使用 (128MB)
-export NODE_OPTIONS="--max-old-space-size=128"
-
-# 设置生产环境
-export NODE_ENV=production
-
-# 减少日志输出
-export UPTIME_KUMA_LOG_LEVEL=warn
-
-# 启动服务
-node server/server.js
-EOF
-
-          chmod +x deploy-package/start-optimized.sh
-
-          # 创建 PM2 配置文件（低资源消耗）
-          cat > deploy-package/ecosystem.config.js << 'EOF'
-module.exports = {
-  apps: [{
-    name: 'uptime-kuma',
-    script: 'server/server.js',
-    instances: 1,
-    exec_mode: 'fork',
-
-    // 内存限制
-    max_memory_restart: '150M',
-
-    // Node.js 参数
-    node_args: '--max-old-space-size=128',
-
-    // 环境变量
-    env: {
-      NODE_ENV: 'production',
-      UPTIME_KUMA_LOG_LEVEL: 'warn'
-    },
-
-    // 日志配置（限制大小）
-    error_file: 'logs/error.log',
-    out_file: 'logs/out.log',
-    log_date_format: 'YYYY-MM-DD HH:mm:ss',
-    merge_logs: true,
-
-    // 自动重启配置
-    autorestart: true,
-    watch: false,
-    max_restarts: 10,
-    min_uptime: '10s',
-
-    // 优雅关闭
-    kill_timeout: 5000,
-    wait_ready: true,
-    listen_timeout: 10000
-  }]
-};
-EOF
-
-          # 创建 systemd 服务文件
-          cat > deploy-package/uptime-kuma.service << 'EOF'
-[Unit]
-Description=Uptime Kuma - Optimized for Low-End Server
-After=network.target
-
-[Service]
-Type=simple
-User=YOUR_USERNAME
-WorkingDirectory=/path/to/uptime-kuma
-Environment="NODE_ENV=production"
-Environment="NODE_OPTIONS=--max-old-space-size=128"
-Environment="UPTIME_KUMA_LOG_LEVEL=warn"
-ExecStart=/usr/bin/node server/server.js
-Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=uptime-kuma
-
-# 资源限制
-MemoryLimit=200M
-CPUQuota=50%
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-          # 创建优化配置说明
-          cat > deploy-package/OPTIMIZATION.md << 'EOF'
-# 🚀 低配服务器优化配置
-
-本版本已针对低配服务器进行优化：
-
-## ✅ 已应用的优化
-
-1. **仅生产依赖** - 减少 ~150MB 磁盘占用
-2. **限制内存** - 最大 128MB Node.js 堆内存
-3. **减少日志** - 仅输出警告和错误
-4. **预构建前端** - 无需本地构建，节省资源
-
-## 📊 预期资源消耗
-
-- **内存**: ~80-120 MB
-- **磁盘**: ~400 MB
-- **CPU**: 空闲时 <1%
-
-## 🔧 部署方式
-
-### 方式 1: 使用 PM2（推荐）
-
-```bash
-npm install pm2 -g
-pm2 start ecosystem.config.js
-pm2 startup
-pm2 save
-```
-
-### 方式 2: 使用 systemd
-
-```bash
-# 编辑服务文件，修改用户名和路径
-sudo nano uptime-kuma.service
-
-# 复制到系统目录
-sudo cp uptime-kuma.service /etc/systemd/system/
-
-# 启动服务
-sudo systemctl daemon-reload
-sudo systemctl start uptime-kuma
-sudo systemctl enable uptime-kuma
-```
-
-### 方式 3: 直接运行
-
-```bash
-./start-optimized.sh
-```
-
-## ⚙️ 额外优化建议
-
-1. **减少监控频率**
-   - 在 Web 界面中，将监控间隔设置为 120 秒或更长
-
-2. **限制监控数量**
-   - 建议不超过 20 个监控项目
-
-3. **禁用不必要的功能**
-   - 关闭不需要的通知渠道
-   - 禁用 Docker 监控（如果不需要）
-
-4. **定期清理**
-   ```bash
-   # 清理旧数据（保留 30 天）
-   sqlite3 data/kuma.db "DELETE FROM heartbeat WHERE time < datetime('now', '-30 days');"
-   sqlite3 data/kuma.db "VACUUM;"
-   ```
-
-## 🔍 监控资源使用
-
-```bash
-# 查看内存使用
-ps aux | grep node
-
-# 查看 PM2 状态
-pm2 status
-
-# 查看日志
-pm2 logs uptime-kuma --lines 50
-```
-EOF
+          # 复制优化配置文件（从仓库中）
+          cp start-optimized.sh deploy-package/
+          cp ecosystem.config.js deploy-package/
+          cp uptime-kuma.service deploy-package/
+          cp OPTIMIZATION.md deploy-package/
 
           # 打包
           tar -czf uptime-kuma-optimized.tar.gz -C deploy-package .
@@ -281,13 +114,13 @@ EOF
           UPSTREAM_VERSION="${{ steps.check_updates.outputs.upstream_version }}"
           CURRENT_VERSION="${{ steps.check_updates.outputs.current_version }}"
 
-          cat > release_notes.md << EOF
-          # 🎉 自动更新至 ${UPSTREAM_VERSION}
+          cat > release_notes.md << 'RELEASE_NOTES_EOF'
+          # 🎉 自动更新至 $UPSTREAM_VERSION
 
           ## 📦 版本信息
 
-          - **上游版本**: ${UPSTREAM_VERSION}
-          - **更新时间**: $(date '+%Y-%m-%d %H:%M:%S')
+          - **上游版本**: $UPSTREAM_VERSION
+          - **更新时间**: $UPDATE_TIME
           - **更新方式**: 自动检测并合并
 
           ## ⚡ 优化特性
@@ -310,33 +143,33 @@ EOF
 
           ### 下载并解压
 
-          \`\`\`bash
-          wget https://github.com/YOUR_USERNAME/uptime-kuma/releases/download/${UPSTREAM_VERSION}/uptime-kuma-optimized.tar.gz
+          ```bash
+          wget https://github.com/poboll/uptime-kuma/releases/download/$UPSTREAM_VERSION/uptime-kuma-optimized.tar.gz
           tar -xzf uptime-kuma-optimized.tar.gz
           cd uptime-kuma
-          \`\`\`
+          ```
 
           ### 使用 PM2 启动（推荐）
 
-          \`\`\`bash
+          ```bash
           npm install pm2 -g
           pm2 start ecosystem.config.js
           pm2 startup && pm2 save
-          \`\`\`
+          ```
 
           ### 或使用 systemd
 
-          \`\`\`bash
+          ```bash
           # 编辑 uptime-kuma.service，修改用户名和路径
           sudo cp uptime-kuma.service /etc/systemd/system/
           sudo systemctl daemon-reload
           sudo systemctl start uptime-kuma
           sudo systemctl enable uptime-kuma
-          \`\`\`
+          ```
 
           ## 📝 上游更新日志
 
-          查看完整更新日志: https://github.com/louislam/uptime-kuma/releases/tag/${UPSTREAM_VERSION}
+          查看完整更新日志: https://github.com/louislam/uptime-kuma/releases/tag/$UPSTREAM_VERSION
 
           ## ⚠️ 注意事项
 
@@ -348,11 +181,18 @@ EOF
           ---
 
           🤖 本版本由 GitHub Actions 自动构建和发布
-          EOF
+          RELEASE_NOTES_EOF
 
-          echo "release_notes<<EOF" >> $GITHUB_OUTPUT
-          cat release_notes.md >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # 替换变量
+          sed -i "s/\$UPSTREAM_VERSION/${UPSTREAM_VERSION}/g" release_notes.md
+          sed -i "s/\$UPDATE_TIME/$(date '+%Y-%m-%d %H:%M:%S')/g" release_notes.md
+
+          # 输出到 GITHUB_OUTPUT
+          {
+            echo "release_notes<<NOTES_EOF"
+            cat release_notes.md
+            echo "NOTES_EOF"
+          } >> $GITHUB_OUTPUT
 
       - name: Commit and push changes
         if: steps.check_updates.outputs.has_updates == 'true'
@@ -362,15 +202,15 @@ EOF
           git add .
           git commit -m "feat: 自动更新至 ${UPSTREAM_VERSION} 并优化低配服务器性能
 
-- 合并上游 ${UPSTREAM_VERSION} 版本更新
-- 优化内存使用（限制 128MB 堆内存）
-- 仅安装生产依赖，减少磁盘占用
-- 添加低配服务器优化配置
-- 包含 PM2 和 systemd 配置文件
-- 预期内存消耗: ~80-120MB
-- 预期磁盘占用: ~400MB
+          - 合并上游 ${UPSTREAM_VERSION} 版本更新
+          - 优化内存使用（限制 128MB 堆内存）
+          - 仅安装生产依赖，减少磁盘占用
+          - 添加低配服务器优化配置
+          - 包含 PM2 和 systemd 配置文件
+          - 预期内存消耗: ~80-120MB
+          - 预期磁盘占用: ~400MB
 
-🤖 由 GitHub Actions 自动生成" || echo "没有需要提交的更改"
+          🤖 由 GitHub Actions 自动生成" || echo "没有需要提交的更改"
 
           git push origin master
 
